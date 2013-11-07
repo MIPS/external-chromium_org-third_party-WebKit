@@ -82,13 +82,15 @@
 #include "wtf/Assertions.h"
 #include "wtf/FastMalloc.h"
 #include "wtf/SpinLock.h"
+#include "wtf/Alignment.h"
 
 #include <stdlib.h>
 
 namespace WTF {
 
-// Allocation granularity of sizeof(void*) bytes.
-static const size_t kAllocationGranularity = sizeof(void*);
+// Allocation granularity of sizeof(double) bytes.
+typedef double align_t;
+static const size_t kAllocationGranularity = sizeof(align_t);
 static const size_t kAllocationGranularityMask = kAllocationGranularity - 1;
 static const size_t kBucketShift = (kAllocationGranularity == 8) ? 3 : 2;
 // Supports allocations up to 4088 (one bucket is used for metadata).
@@ -121,19 +123,19 @@ struct PartitionPageHeader {
     PartitionFreelistEntry* freelistHead;
     PartitionPageHeader* next;
     PartitionPageHeader* prev;
-};
+} WTF_ALIGN(sizeof(align_t));
 
 struct PartitionFreepagelistEntry {
     PartitionPageHeader* page;
     PartitionFreepagelistEntry* next;
-};
+} WTF_ALIGN(sizeof(align_t));
 
 struct PartitionBucket {
     PartitionRoot* root;
     PartitionPageHeader* currPage;
     PartitionFreepagelistEntry* freePages;
     size_t numFullPages;
-};
+} WTF_ALIGN(sizeof(align_t));
 
 struct PartitionRoot {
     int lock;
@@ -189,11 +191,17 @@ ALWAYS_INLINE void* partitionBucketAlloc(PartitionBucket* bucket)
     return partitionAllocSlowPath(bucket);
 }
 
+ALWAYS_INLINE size_t partitionAllocRoundup(size_t size)
+{
+    return (size + kAllocationGranularityMask) & ~kAllocationGranularityMask;
+}
+
 ALWAYS_INLINE void* partitionAlloc(PartitionRoot* root, size_t size)
 {
 #if defined(MEMORY_TOOL_REPLACES_ALLOCATOR)
     return malloc(size);
 #else
+    size = partitionAllocRoundup(size);
     size_t index = size >> kBucketShift;
     ASSERT(index < kNumBuckets);
     ASSERT(size == index << kBucketShift);
@@ -234,18 +242,13 @@ ALWAYS_INLINE void partitionFree(void* ptr)
 #endif
 }
 
-ALWAYS_INLINE size_t partitionAllocRoundup(size_t size)
-{
-    return (size + kAllocationGranularityMask) & ~kAllocationGranularityMask;
-}
-
 ALWAYS_INLINE void* partitionAllocGeneric(PartitionRoot* root, size_t size)
 {
 #if defined(MEMORY_TOOL_REPLACES_ALLOCATOR)
     return malloc(size);
 #else
+    size = partitionAllocRoundup(size);
     if (LIKELY(size <= kMaxAllocation)) {
-        size = partitionAllocRoundup(size);
         spinLockLock(&root->lock);
         void* ret = partitionAlloc(root, size);
         spinLockUnlock(&root->lock);
